@@ -213,10 +213,10 @@ class CrisisInput(BaseModel):
     sector: Optional[str] = None
     origin: Optional[str] = None
     audience_locales: Optional[List[str]] = None
-    public_sentiment: Optional[str] = None
+    public_sentiment: Optional[List[str]] = None
     urgency_level: Optional[str] = None
     language: Optional[str] = None
-    preferred_tone: Optional[str] = None
+    preferred_tone:Optional[List[str]] = None
     constraints: Optional[List[str]] = None
     brand_style: Optional[Dict[str, Any]] = None
     kb_tags: Optional[List[str]] = None
@@ -305,3 +305,4 @@ def get_result(req: ResultRequest):
     if not row:
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
+
