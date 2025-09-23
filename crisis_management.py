@@ -1,8 +1,8 @@
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -16,6 +16,64 @@ from database import fetch_latest_result, save_result
 # -----------------------------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -----------------------------------------------------------------------------
+# Pydantic models (input & output envelopes)
+# -----------------------------------------------------------------------------
+class CrisisInput(BaseModel):
+    crisis_description: Optional[str] = None
+    sector: Optional[str] = None
+    origin: Optional[str] = None
+    audience_locales: Optional[List[str]] = None
+    public_sentiment: Optional[List[str]] = None
+    urgency_level: Optional[str] = None
+    language: Optional[str] = None
+    preferred_tone: Optional[List[str]] = None
+    constraints: Optional[List[str]] = None
+    brand_style: Optional[Dict[str, Any]] = None
+    kb_tags: Optional[List[str]] = None
+    channels_context: Optional[Dict[str, Any]] = None
+    time_horizon_hours: Optional[int] = None
+    coverage: Optional[str] = None
+    legal_sensitivity: Optional[str] = None
+    safety_implications: Optional[bool] = None
+    vip_involved: Optional[bool] = None
+
+class StartPayload(BaseModel):
+    request_id: int = Field(..., gt=0)
+    user_id: int    = Field(..., gt=0)
+    data: Optional[CrisisInput] = None
+    data_raw: Optional[str] = None
+
+class ResultRequest(BaseModel):
+    request_id: int = Field(..., gt=0)
+
+class ApiStatus(BaseModel):
+    status: str
+    result: Optional[str] = None
+    message: Optional[str] = None
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def _normalize_language(d: Dict[str, Any]) -> None:
+    """Map Arabic/English labels to ar/en to satisfy prompt rule."""
+    lang = (d.get("language") or "").strip().lower()
+    if lang in ("العربية", "arabic", "ar"):
+        d["language"] = "ar"
+    elif lang in ("الإنجليزية", "english", "en"):
+        d["language"] = "en"
+
+def _to_llm_input(data: Optional[CrisisInput], data_raw: Optional[str]):
+    """Prefer structured dict; fall back to raw string; else {}."""
+    if data is not None:
+        d = data.model_dump(exclude_none=True)
+        if isinstance(d, dict):
+            _normalize_language(d)
+        return d
+    elif data_raw:
+        return data_raw
+    return {}
 
 # -----------------------------------------------------------------------------
 # Core LLM function (your exact logic, just wrapped safely)
@@ -145,12 +203,18 @@ def crisis_management_update2(data: Any) -> str:
 
     قواعد صارمة للإخراج:
     - أعد كائن JSON واحد صالح نحويًا (UTF-8).
-    - لا تُخرج أي أسطر تفسيرية أو Markdown أو تعليقات.
+    - لا تُخرج any أسطر تفسيرية أو Markdown أو تعليقات.
     - إذا اللغة = "ar" اجعل human_summary بالعربية الفصحى، وإلا بالإنجليزية.
     - املأ "gaps_required" بأي معلومات تنقصك بدلاً من التخمين.
     - لا تضف حقولًا غير معرفة، ولا تغيّر أسماء الحقول.
     '''
-    user_msg = f"data: {data}"
+
+    # Build the user message as REAL JSON (or a string block)
+    if isinstance(data, (dict, list)):
+        data_block = json.dumps(data, ensure_ascii=False)
+    else:
+        data_block = str(data)
+    user_msg = "data:\n" + data_block
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -161,9 +225,8 @@ def crisis_management_update2(data: Any) -> str:
     )
     return response.choices[0].message.content
 
-
 # -----------------------------------------------------------------------------
-# Small helper: ensure the model output is ONE valid JSON object (stringified)
+# Ensure the model output is ONE valid JSON object (stringified)
 # -----------------------------------------------------------------------------
 def normalize_result_to_json_string(raw: str) -> str:
     """
@@ -173,27 +236,22 @@ def normalize_result_to_json_string(raw: str) -> str:
     """
     s = (raw or "").strip()
 
-    # Strip common code-fence wrappers if present
+    # Strip code-fence wrappers if present
     if s.startswith("```"):
-        # remove the first fence line and trailing fence
         s = s.strip("`")
-        # heuristic: split by first newline after possible language tag
         parts = s.split("\n", 1)
         s = parts[1] if len(parts) == 2 else parts[0]
         s = s.strip()
 
-    # Try parse
     try:
         parsed = json.loads(s)
     except json.JSONDecodeError as e:
         raise ValueError(f"Model did not return valid JSON: {e}")
 
-    # Re-serialize with UTF-8 friendly settings (no ASCII escaping)
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
-
 # -----------------------------------------------------------------------------
-# FastAPI app & schemas
+# FastAPI app & CORS
 # -----------------------------------------------------------------------------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
@@ -206,56 +264,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-from typing import Optional, List
-
-class CrisisInput(BaseModel):
-    crisis_description: Optional[str] = None
-    sector: Optional[str] = None
-    origin: Optional[str] = None
-    audience_locales: Optional[List[str]] = None
-    public_sentiment: Optional[List[str]] = None
-    urgency_level: Optional[str] = None
-    language: Optional[str] = None
-    preferred_tone:Optional[List[str]] = None
-    constraints: Optional[List[str]] = None
-    brand_style: Optional[Dict[str, Any]] = None
-    kb_tags: Optional[List[str]] = None
-    channels_context: Optional[Dict[str, Any]] = None
-    time_horizon_hours: Optional[int] = None
-    coverage: Optional[str] = None
-    legal_sensitivity: Optional[str] = None
-    safety_implications: Optional[bool] = None
-    vip_involved: Optional[bool] = None
-
-class StartPayload(BaseModel):
-    request_id: int = Field(..., gt=0)
-    user_id: int    = Field(..., gt=0)
-    data: Optional[CrisisInput] = None
-    data_raw: Optional[str] = None
-
-class ResultRequest(BaseModel):
-    request_id: int = Field(..., gt=0)
-
-class ApiStatus(BaseModel):
-    status: str
-    result: Optional[str] = None  # JSON as string to remain compatible with WP consumer
-    message: Optional[str] = None
-
 
 # -----------------------------------------------------------------------------
 # Background processor
 # -----------------------------------------------------------------------------
 def process_job(payload: StartPayload):
-    #try:
-    data_for_llm = payload.data if payload.data is not None else payload.data_raw or {}
-    raw = crisis_management_update2(data_for_llm)
-    normalized = normalize_result_to_json_string(raw)
-    save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=normalized)
-    '''except Exception as e:
-        # Store an error envelope so callers don’t spin forever
+    """Run the job in background, store either result or error JSON."""
+    try:
+        data_for_llm = _to_llm_input(payload.data, payload.data_raw)
+        raw = crisis_management_update2(data_for_llm)
+        normalized = normalize_result_to_json_string(raw)
+        save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=normalized)
+    except Exception as e:
         err_json = json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False)
-        save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_json)'''
-
+        save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_json)
 
 # -----------------------------------------------------------------------------
 # Routes
@@ -267,8 +289,8 @@ def health():
 @app.post("/start", response_model=ApiStatus)
 def start(payload: StartPayload, bg: BackgroundTasks):
     """
-    Asynchronous mode: enqueue background generation and return 'processing' immediately.
-    WordPress can poll /result using request_id.
+    Async mode: enqueue background generation and return 'processing' immediately.
+    WP polls /result with request_id.
     """
     existing = fetch_latest_result(payload.request_id)
     if existing:
@@ -280,15 +302,14 @@ def start(payload: StartPayload, bg: BackgroundTasks):
 @app.post("/start_sync", response_model=ApiStatus)
 def start_sync(payload: StartPayload):
     """
-    Synchronous mode: generate immediately and return 'done' + result.
-    Useful for direct Postman tests or when you want the response inline.
+    Sync mode: generate immediately and return 'done' + result.
     """
     existing = fetch_latest_result(payload.request_id)
     if existing:
         return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
 
     try:
-        data_for_llm = payload.data if payload.data is not None else payload.data_raw or {}
+        data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_update2(data_for_llm)
         normalized = normalize_result_to_json_string(raw)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=normalized)
@@ -305,4 +326,3 @@ def get_result(req: ResultRequest):
     if not row:
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
-
