@@ -83,7 +83,7 @@ def crisis_management_update3(data: Any) -> str:
     Calls OpenAI with your structured Arabic prompt and returns the raw model output.
     NOTE: We expect the model to return ONE valid JSON object (UTF-8).
     """
-    prompt = ''' أنت مستشار أزمات اتصالية احترافي.
+    prompt = f''' أنت مستشار أزمات اتصالية احترافي.
         التزم بالقانون والسياسات الداخلية، وتجنّب الافتراضات غير المؤكدة.
         إن لم تتوفر معلومة، أوصِ بجمعها بدل تخمينها.
         قدم التفسير مع ذكر كيفية التنفيذ بالتفصيل لكل نقطة وذكر سبب الاختيار لها.
@@ -288,6 +288,7 @@ def get_result(req: ResultRequest):
     if not row:
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
+
 
 
 
