@@ -78,7 +78,7 @@ def _to_llm_input(data: Optional[CrisisInput], data_raw: Optional[str]):
 # -----------------------------------------------------------------------------
 # Core LLM function (your exact logic, just wrapped safely)
 # -----------------------------------------------------------------------------
-def crisis_management_update2(data: Any) -> str:
+def crisis_management_update3(data: Any) -> str:
     """
     Calls OpenAI with your structured Arabic prompt and returns the raw model output.
     NOTE: We expect the model to return ONE valid JSON object (UTF-8).
@@ -90,10 +90,10 @@ def crisis_management_update2(data: Any) -> str:
         اكتب بالعربية الفصحى أو الإنجليزية بحسب لغة المدخلات. قدّم مخرجات منظمة قابلة للتنفيذ فورًا  .
         التصنيفات (القيم الممكنة):
 
-        تصنيف الأزمة: السمعة، تشغيلية، قانونية، سلامة، اختراق بيانات، معلومات مضللة، اجتماعية/أخلاقية
-        مستوى المخاطر: منخفض، متوسط، مرتفع، حرج
-        الاستراتيجية: إقرار وتفسير، إقرار والتحقيق، احتواء وتهدئة، تصحيح المعلومات، نفي مدعوم بالأدلة، اعتذار مشروط، اعتذار كامل، مراقبة صامتة
-        النبرة: رسمية، مهنية، إنسانية، مطمئنة، حازمة
+         تصنيف الأزمة: السمعة، تشغيلية، قانونية، سلامة، اختراق بيانات، معلومات مضللة، اجتماعية/أخلاقية ( مع ذكر السبب)
+        مستوى المخاطر: منخفض، متوسط، مرتفع، حرج ( مع ذكر السبب)
+        الاستراتيجية: إقرار وتفسير، إقرار والتحقيق، احتواء وتهدئة، تصحيح المعلومات، نفي مدعوم بالأدلة، اعتذار مشروط، اعتذار كامل، مراقبة صامتة ( مع ذكر السبب)
+        
         حساب المخاطر:
         الحدود: الوصول ∈ [0..20]، السرعة ∈ [0..15]، السلبية ∈ [0..15]، السلامة ∈ [0..20]، القانون ∈ [0..10]، حساسية الشخصيات ∈ [0..10]، الموثوقية ∈ [0..10]
         المعادلة: درجة_المخاطر = الوصول + السرعة + السلبية + السلامة + القانون + حساسية_الشخصيات + الموثوقية (من 0 إلى 100)
@@ -139,47 +139,35 @@ def crisis_management_update2(data: Any) -> str:
 
             > حاجز أمان: لا يعتمد على النفي إلّا مع مبررات/أدلة قابلة للإبراز.
 
-          "خطة_العمل": {{
+          "خطة_العمل": 
             "الأفق_الزمني_بالساعات": <عدد_صحيح>,
-            "المراحل": [
-              {{
+            "المراحل": 
                 "النافذة": "... ساعة",
                 "الإجراءات": [
-                  {{ "المهمة": "<string>", "المسؤول": "<دور>", "سقف_زمني": "<مدة>", "ملاحظات": "<string اختياري>" }}
+                  {{ "المهمة":, "المسؤول": , "سقف_زمني": "<مدة>", "ملاحظات":  }}
             ],
             "المسؤولون": ,
-            "أصول_الاتصال": {{
-              "بيان": {{
-                "النوع": "بيان صحفي",
-                "القناة": "نشرة_صحفية",
+            "أصول_الاتصال":
+              "بيان": 
+                "النوع":
+                "القناة": ,
                 "المحتوى": "<string>",
                 "التوقيع": "<string>"
-              }}
-            }},
-            "القنوات": {{
+            "السوشال ميديا و الوسائل المستهدفة ": {{
               "مطلوب": ["<string>"],
               "مستبعد": ["<string>"]
             }},
             "المتابعة": {{
               "التواتر": "<كل_ساعة|كل_4_ساعات|يوميًا>",
-              "المقاييس": ["<تغير_الحجم>", "<تحول_المشاعر>", "<متوسط_زمن_الاستجابة>"]
-            }}
-              }},
-
-              "مؤشرات_الأداء": {{
+              "المقاييس": ["<تغير_الحجم>", "<تحول_المشاعر>", "<متوسط_زمن_الاستجابة>"] ,
+              "مؤشرات_الأداء": 
              خلال الوقت المذكور
                 "متوسط_زمن_الاستجابة_اجتماعيًا": "<قيمة زمنية>",
-                "معدل_الحل_خلال_72_ساعة": "<قيمة أو نسبة>"
-              }},
-
+                "معدل_الحل_خلال_حدد عدد_الساعات حسب_المشكلة": "<قيمة أو نسبة>",
               "محفزات_التصعيد": ["<string>"],
               "مراجع_قاعدة_المعرفة": ["<string>"],
-              "سجل_التدقيق": [
-                {{ "طابع_زمني": "<تاريخ/وقت المذكور >", "حدث": "<string>", "بواسطة": "<نظام|مستخدم>" }}
-                ],
-            }}
+              "سجل_التدقيق": طابع_زمني :{data.date}, "حدث": "<string>", "بواسطة": "<نظام|مستخدم>" 
                   "موجز ": "<string>" يوضح الخطوات المطلوبة بشكل مقالي واضح ودقيق 
-                }}
 
                 قواعد صارمة للإخراج:
                 - إذا اللغة = "ar" اجعل human_summary بالعربية الفصحى، وإلا بالإنجليزية.
@@ -249,7 +237,7 @@ def process_job(payload: StartPayload):
     """Run the job in background, store either result or error JSON."""
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
-        raw = crisis_management_update2(data_for_llm)
+        raw = crisis_management_update3(data_for_llm)
         normalized = normalize_result_to_json_string(raw)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=normalized)
     except Exception as e:
@@ -287,7 +275,7 @@ def start_sync(payload: StartPayload):
 
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
-        raw = crisis_management_update2(data_for_llm)
+        raw = crisis_management_update3(data_for_llm)
         normalized = normalize_result_to_json_string(raw)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=normalized)
         return ApiStatus(status="done", result=normalized)
@@ -303,4 +291,5 @@ def get_result(req: ResultRequest):
     if not row:
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
+
 
