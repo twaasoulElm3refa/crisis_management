@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date as DtDate 
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, BackgroundTasks
@@ -38,7 +38,7 @@ class CrisisInput(BaseModel):
     legal_sensitivity: Optional[str] = None
     safety_implications: Optional[bool] = None
     vip_involved: Optional[bool] = None
-    date: Optional[date] = None  # optional "today" if you send it from PHP
+    date: Optional[DtDate ] = None  # optional "today" if you send it from PHP
 
 class StartPayload(BaseModel):
     request_id: int = Field(..., gt=0)
@@ -253,3 +253,4 @@ def get_result(req: ResultRequest):
     if not row:
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
+
