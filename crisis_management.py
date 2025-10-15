@@ -11,43 +11,29 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
 import jwt  # PyJWT
-import logging
 
-# ---- DB helpers (already implemented elsewhere) ----
+# ---- DB helpers (your existing functions) ----
 from database import fetch_latest_result, save_result
 
 # -----------------------------------------------------------------------------
-# Setup & logging
+# Setup
 # -----------------------------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-log = logging.getLogger("crm_api")
-logging.basicConfig(level=logging.INFO)
-
-# -----------------------------------------------------------------------------
-# Security / JWT
-# -----------------------------------------------------------------------------
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 JWT_SECRET = os.getenv("JWT_SECRET") or os.urandom(32)
 JWT_ALG = "HS256"
 
-def _make_jwt(session_id: str, user_id: int) -> str:
-    payload = {
-        "sid": session_id,
-        "uid": user_id,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 60 * 60 * 2,  # 2 hours
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+app = FastAPI(title="Crisis Management API", version="1.3.0")
 
-def _verify_jwt(bearer: Optional[str]):
-    if not bearer or not bearer.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = bearer.split(" ", 1)[1]
-    try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------------------------------------------------------------
 # Models
@@ -79,17 +65,14 @@ class StartPayload(BaseModel):
     data_raw: Optional[str] = None
 
 class ResultRequest(BaseModel):
-    # support both names so client can send either
-    request_id: Optional[int] = None
-    id: Optional[int] = None
+    request_id: int = Field(..., gt=0)
 
 class ApiStatus(BaseModel):
-    ok: bool
     status: str
     result: Optional[str] = None
     message: Optional[str] = None
 
-# ==== Chat models ====
+# ==== Chat models (matches the example concept) ====
 class SessionIn(BaseModel):
     user_id: int
     wp_nonce: Optional[str] = None
@@ -111,6 +94,7 @@ class VisibleValue(BaseModel):
     constraints: Optional[str] = None
     kb_tags: Optional[str] = None
     date: Optional[str] = None
+    # main context: latest narrative text cached in browser or from DB (plugin sends it)
     article: Optional[str] = None
 
 class ChatIn(BaseModel):
@@ -143,23 +127,40 @@ def _values_to_context(values: List[VisibleValue]) -> str:
     if not values:
         return "لا توجد بيانات مرئية حالياً لهذا المستخدم."
     v = values[0]
-    pieces = []
-    if v.sector:             pieces.append(f"القطاع: {v.sector}")
-    if v.origin:             pieces.append(f"المصدر: {v.origin}")
-    if v.language:           pieces.append(f"اللغة: {v.language}")
-    if v.urgency_level:      pieces.append(f"الإلحاح: {v.urgency_level}")
-    if v.preferred_tone:     pieces.append(f"النبرة: {v.preferred_tone}")
-    if v.kb_tags:            pieces.append(f"وسوم: {v.kb_tags}")
-    if v.constraints:        pieces.append(f"قيود: {v.constraints}")
-    if v.audience_locales:   pieces.append(f"مناطق الجمهور: {v.audience_locales}")
-    if v.public_sentiment:   pieces.append(f"انطباع الجمهور: {v.public_sentiment}")
-    if v.date:               pieces.append(f"التاريخ: {v.date}")
-    if v.crisis_description: pieces.append(f"وصف الأزمة: {v.crisis_description}")
-    if v.article:
-        pieces.append(f"أحدث نص:\n{v.article}")
-    return " | ".join(pieces) if pieces else "لا توجد تفاصيل كافية."
+    parts = []
+    if v.sector:             parts.append(f"القطاع: {v.sector}")
+    if v.origin:             parts.append(f"المصدر: {v.origin}")
+    if v.language:           parts.append(f"اللغة: {v.language}")
+    if v.urgency_level:      parts.append(f"الإلحاح: {v.urgency_level}")
+    if v.preferred_tone:     parts.append(f"النبرة: {v.preferred_tone}")
+    if v.kb_tags:            parts.append(f"وسوم: {v.kb_tags}")
+    if v.constraints:        parts.append(f"قيود: {v.constraints}")
+    if v.audience_locales:   parts.append(f"مناطق الجمهور: {v.audience_locales}")
+    if v.public_sentiment:   parts.append(f"انطباع الجمهور: {v.public_sentiment}")
+    if v.date:               parts.append(f"التاريخ: {v.date}")
+    if v.crisis_description: parts.append(f"وصف الأزمة: {v.crisis_description}")
+    if v.article:            parts.append(f"أحدث نص:\n{v.article}")
+    return " | ".join(parts) if parts else "لا توجد تفاصيل كافية."
 
-def _no_store(resp: dict) -> JSONResponse:
+def _make_jwt(session_id: str, user_id: int) -> str:
+    payload = {
+        "sid": session_id,
+        "uid": user_id,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 60 * 60 * 2,  # 2 hours
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def _verify_jwt(bearer: Optional[str]):
+    if not bearer or not bearer.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = bearer.split(" ", 1)[1]
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def _nostore(resp: dict) -> JSONResponse:
     r = JSONResponse(resp)
     r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     r.headers["Pragma"] = "no-cache"
@@ -167,7 +168,7 @@ def _no_store(resp: dict) -> JSONResponse:
     return r
 
 # -----------------------------------------------------------------------------
-# Core LLM function — narrative
+# LLM (narrative)
 # -----------------------------------------------------------------------------
 def crisis_management_narrative(data: Any) -> str:
     prompt = f"""
@@ -250,49 +251,18 @@ def crisis_management_narrative(data: Any) -> str:
     - كن عمليًا ودقيقًا، وقدّم سببًا واضحًا لكل اختيار.
     - لا تستخدم JSON أو ترميز برمجي؛ الإخراج نصي إنساني قابل للقراءة والتطبيق الفوري.
     """
-    response = client.chat.completions.create(
+    resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "system", "content": "You are an expert assistant. Always give long, detailed, and accurate answers with examples."},
-            {"role": "user", "content": f" data:{data}"},
+            {"role": "user",   "content": f" data:{data}"},
         ],
     )
-    return response.choices[0].message.content
+    return resp.choices[0].message.content
 
 # -----------------------------------------------------------------------------
-# FastAPI app & CORS
-# -----------------------------------------------------------------------------
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-app = FastAPI(title="Crisis Management API", version="1.2.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -----------------------------------------------------------------------------
-# Background processor
-# -----------------------------------------------------------------------------
-def process_job(payload: StartPayload):
-    """Run in background; store RAW narrative text (no JSON)."""
-    try:
-        data_for_llm = _to_llm_input(payload.data, payload.data_raw)
-        raw = crisis_management_narrative(data_for_llm)
-        save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
-        log.info("Data saved successfully (request_id=%s)", payload.request_id)
-    except Exception as e:
-        err_text = f"ERROR: {type(e).__name__}: {e}"
-        try:
-            save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
-        finally:
-            log.exception("Background job failed: %s", e)
-
-# -----------------------------------------------------------------------------
-# Routes
+# Routes (existing)
 # -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -302,60 +272,56 @@ def health():
 def start(payload: StartPayload, bg: BackgroundTasks):
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(ok=True, status="done", result=existing["edited_result"] or existing["result"])
+        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
     bg.add_task(process_job, payload)
-    return ApiStatus(ok=True, status="processing")
+    return ApiStatus(status="processing")
 
 @app.post("/start_sync", response_model=ApiStatus)
 def start_sync(payload: StartPayload):
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(ok=True, status="done", result=existing["edited_result"] or existing["result"])
+        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
-        return ApiStatus(ok=True, status="done", result=raw)
+        return ApiStatus(status="done", result=raw)
     except Exception as e:
         err_text = f"ERROR: {type(e).__name__}: {e}"
         try:
             save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
         finally:
-            return ApiStatus(ok=False, status="error", message=err_text)
+            return ApiStatus(status="error", message=err_text)
 
 @app.post("/result")
 def get_result(req: ResultRequest):
-    """
-    Stable, cache-busting result endpoint.
-    Always returns one of:
-      {"ok": false, "status":"processing"}
-      {"ok": true,  "status":"done", "result":"..."}
-    """
-    rid = req.request_id or req.id
-    if not rid:
-        raise HTTPException(status_code=400, detail="Missing request_id")
-
-    row = fetch_latest_result(int(rid))
+    row = fetch_latest_result(req.request_id)
     if not row:
-        log.info("Fetched result: <None> (request_id=%s)", rid)
-        return _no_store({"ok": False, "status": "processing"})
-
-    text = (row.get("edited_result") or row.get("result") or "").strip()
-    if not text:
-        log.info("Fetched result: <empty> (request_id=%s)", rid)
-        return _no_store({"ok": False, "status": "processing"})
-
-    log.info("Fetched result: <dict> (request_id=%s)", rid)
-    return _no_store({"ok": True, "status": "done", "result": text, "id": int(rid)})
+        return _nostore({"status": "processing"})
+    return _nostore({"status": "done", "result": row["edited_result"] or row["result"]})
 
 # -----------------------------------------------------------------------------
-# Chat
+# Background worker
+# -----------------------------------------------------------------------------
+def process_job(payload: StartPayload):
+    try:
+        data_for_llm = _to_llm_input(payload.data, payload.data_raw)
+        raw = crisis_management_narrative(data_for_llm)
+        save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
+    except Exception as e:
+        err_text = f"ERROR: {type(e).__name__}: {e}"
+        try:
+            save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
+        except Exception:
+            pass
+
+# -----------------------------------------------------------------------------
+# NEW: chat (same concept as example)
 # -----------------------------------------------------------------------------
 @app.post("/session", response_model=SessionOut)
 def create_session(body: SessionIn):
     sid = str(uuid.uuid4())
     token = _make_jwt(sid, body.user_id)
-    log.info("✅ Connected! /session")
     return SessionOut(session_id=sid, token=token)
 
 @app.post("/chat")
@@ -363,11 +329,12 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
     _verify_jwt(authorization)
     context = _values_to_context(body.visible_values)
     sys_prompt = (
-        "أنت مساعد موثوق يجيب بالاعتماد على البيانات المرئية الحالية للمستخدم. "
+        "أنت مساعد إدارة الأزمات الاتصالية موثوق يجيب بالاعتماد على البيانات المرئية الحالية للمستخدم. "
         "إذا كانت المعلومة غير متوفرة فاذكر ذلك صراحةً واقترح ما يمكن فعله للحصول عليها.\n\n"
         f"البيانات المرئية الحالية:\n{context}"
     )
     user_msg = body.message or ""
+
     def stream():
         try:
             response = client.chat.completions.create(
@@ -375,7 +342,7 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
                 temperature=0.2,
                 messages=[
                     {"role": "system", "content": sys_prompt},
-                    {"role": "user",   "content": user_msg}
+                    {"role": "user",   "content": user_msg},
                 ],
                 stream=True
             )
@@ -386,5 +353,4 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
         except Exception as e:
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
-    log.info("✅ Connected! /chat")
     return StreamingResponse(stream(), media_type="text/plain")
