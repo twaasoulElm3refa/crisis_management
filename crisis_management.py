@@ -1,12 +1,16 @@
 import os
-from datetime import date as DtDate 
+import time
+import uuid
+from datetime import date as DtDate
 from typing import Any, Dict, Optional, List
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
+import jwt  # PyJWT
 
 # ---- DB helpers (already implemented elsewhere) ----
 from database import fetch_latest_result, save_result
@@ -16,6 +20,30 @@ from database import fetch_latest_result, save_result
 # -----------------------------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -----------------------------------------------------------------------------
+# Security / JWT
+# -----------------------------------------------------------------------------
+JWT_SECRET = os.getenv("JWT_SECRET") or os.urandom(32)
+JWT_ALG = "HS256"
+
+def _make_jwt(session_id: str, user_id: int) -> str:
+    payload = {
+        "sid": session_id,
+        "uid": user_id,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 60 * 60 * 2,  # 2 hours
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def _verify_jwt(bearer: Optional[str]):
+    if not bearer or not bearer.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = bearer.split(" ", 1)[1]
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # -----------------------------------------------------------------------------
 # Pydantic models (input & output envelopes)
@@ -38,7 +66,7 @@ class CrisisInput(BaseModel):
     legal_sensitivity: Optional[str] = None
     safety_implications: Optional[bool] = None
     vip_involved: Optional[bool] = None
-    date: Optional[DtDate ] = None  # optional "today" if you send it from PHP
+    date: Optional[DtDate] = None  # optional "today" if you send it from PHP
 
 class StartPayload(BaseModel):
     request_id: int = Field(..., gt=0)
@@ -53,6 +81,40 @@ class ApiStatus(BaseModel):
     status: str
     result: Optional[str] = None
     message: Optional[str] = None
+
+# ==== NEW: Chat models to match the WordPress plugin ====
+
+class SessionIn(BaseModel):
+    user_id: int
+    wp_nonce: Optional[str] = None  # carried through but not used here
+
+class SessionOut(BaseModel):
+    session_id: str
+    token: str
+
+class VisibleValue(BaseModel):
+    # From your WP visible_values (most fields optional)
+    id: Optional[int] = None
+    crisis_description: Optional[str] = None
+    sector: Optional[str] = None
+    origin: Optional[str] = None
+    audience_locales: Optional[str] = None  # plugin sends comma-joined for display, OK as string
+    public_sentiment: Optional[str] = None
+    urgency_level: Optional[str] = None
+    language: Optional[str] = None
+    preferred_tone: Optional[str] = None
+    constraints: Optional[str] = None
+    kb_tags: Optional[str] = None
+    date: Optional[str] = None
+
+    # critical for chat context
+    article: Optional[str] = None  # latest narrative text (edited or raw), from localStorage/DB
+
+class ChatIn(BaseModel):
+    session_id: str
+    user_id: int
+    message: str
+    visible_values: List[VisibleValue] = Field(default_factory=list)
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -75,6 +137,29 @@ def _to_llm_input(data: Optional[CrisisInput], data_raw: Optional[str]):
     elif data_raw:
         return data_raw
     return {}
+
+def _values_to_context(values: List[VisibleValue]) -> str:
+    """Arabic context line(s) for chat based on latest visible values."""
+    if not values:
+        return "لا توجد بيانات مرئية حالياً لهذا المستخدم."
+    v = values[0]
+    pieces = []
+    if v.sector:             pieces.append(f"القطاع: {v.sector}")
+    if v.origin:             pieces.append(f"المصدر: {v.origin}")
+    if v.language:           pieces.append(f"اللغة: {v.language}")
+    if v.urgency_level:      pieces.append(f"الإلحاح: {v.urgency_level}")
+    if v.preferred_tone:     pieces.append(f"النبرة: {v.preferred_tone}")
+    if v.kb_tags:            pieces.append(f"وسوم: {v.kb_tags}")
+    if v.constraints:        pieces.append(f"قيود: {v.constraints}")
+    if v.audience_locales:   pieces.append(f"مناطق الجمهور: {v.audience_locales}")
+    if v.public_sentiment:   pieces.append(f"انطباع الجمهور: {v.public_sentiment}")
+    if v.date:               pieces.append(f"التاريخ: {v.date}")
+    if v.crisis_description: pieces.append(f"وصف الأزمة: {v.crisis_description}")
+    # Include latest narrative text if available
+    if v.article:
+        # keep it last, labelled clearly
+        pieces.append(f"أحدث نص (تحليلي/صياغي):\n{v.article}")
+    return " | ".join(pieces) if pieces else "لا توجد تفاصيل كافية."
 
 # -----------------------------------------------------------------------------
 # Core LLM function — narrative (no JSON)
@@ -166,9 +251,9 @@ def crisis_management_narrative(data: Any) -> str:
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content":prompt },
-            {"role": "system","content": "You are an expert assistant. Always give long, detailed, and accurate answers with examples."},
-            {"role": "user", "content":f" data:{data}"},
+            {"role": "system", "content": prompt},
+            {"role": "system", "content": "You are an expert assistant. Always give long, detailed, and accurate answers with examples."},
+            {"role": "user", "content": f" data:{data}"},
         ],
     )
     return response.choices[0].message.content
@@ -177,7 +262,7 @@ def crisis_management_narrative(data: Any) -> str:
 # FastAPI app & CORS
 # -----------------------------------------------------------------------------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-app = FastAPI(title="Crisis Management API", version="1.0.0")
+app = FastAPI(title="Crisis Management API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -195,7 +280,6 @@ def process_job(payload: StartPayload):
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
-        # Save raw narrative text directly
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
     except Exception as e:
         err_text = f"ERROR: {type(e).__name__}: {e}"
@@ -205,7 +289,7 @@ def process_job(payload: StartPayload):
             pass
 
 # -----------------------------------------------------------------------------
-# Routes
+# Routes (existing)
 # -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -254,3 +338,53 @@ def get_result(req: ResultRequest):
         return ApiStatus(status="processing")
     return ApiStatus(status="done", result=row["edited_result"] or row["result"])
 
+# -----------------------------------------------------------------------------
+# NEW: Chat routes
+# -----------------------------------------------------------------------------
+@app.post("/session", response_model=SessionOut)
+def create_session(body: SessionIn):
+    """
+    Creates a short-lived JWT for chat. The token is required in Authorization header for /chat.
+    """
+    sid = str(uuid.uuid4())
+    token = _make_jwt(sid, body.user_id)
+    return SessionOut(session_id=sid, token=token)
+
+@app.post("/chat")
+def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
+    """
+    Streaming chat using OpenAI; relies on the visible_values you send from WP.
+    Returns 'text/plain' stream (no SSE framing), exactly how your JS expects it.
+    """
+    _verify_jwt(authorization)
+
+    # Build system prompt from visible values (Arabic default; switch by 'language' if needed)
+    context = _values_to_context(body.visible_values)
+    sys_prompt = (
+        "أنت مساعد موثوق يجيب بالاعتماد على البيانات المرئية الحالية للمستخدم. "
+        "إذا كانت المعلومة غير متوفرة في البيانات المرئية فاذكر ذلك صراحةً "
+        "واقترح ما يمكن فعله للحصول عليها.\n\n"
+        f"البيانات المرئية الحالية:\n{context}"
+    )
+
+    user_msg = body.message or ""
+    def stream():
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user",   "content": user_msg}
+                ],
+                stream=True
+            )
+            for chunk in response:
+                delta = getattr(chunk.choices[0].delta, "content", None) if chunk.choices else None
+                if delta:
+                    yield delta
+        except Exception as e:
+            # Surface readable error to the user stream
+            yield f"\n[خطأ: {type(e).__name__}] {e}"
+
+    return StreamingResponse(stream(), media_type="text/plain")
