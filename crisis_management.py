@@ -11,15 +11,19 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
 import jwt  # PyJWT
+import logging
 
 # ---- DB helpers (already implemented elsewhere) ----
 from database import fetch_latest_result, save_result
 
 # -----------------------------------------------------------------------------
-# OpenAI setup
+# Setup & logging
 # -----------------------------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+log = logging.getLogger("crm_api")
+logging.basicConfig(level=logging.INFO)
 
 # -----------------------------------------------------------------------------
 # Security / JWT
@@ -46,7 +50,7 @@ def _verify_jwt(bearer: Optional[str]):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # -----------------------------------------------------------------------------
-# Pydantic models (input & output envelopes)
+# Models
 # -----------------------------------------------------------------------------
 class CrisisInput(BaseModel):
     crisis_description: Optional[str] = None
@@ -66,7 +70,7 @@ class CrisisInput(BaseModel):
     legal_sensitivity: Optional[str] = None
     safety_implications: Optional[bool] = None
     vip_involved: Optional[bool] = None
-    date: Optional[DtDate] = None  # optional "today" if you send it from PHP
+    date: Optional[DtDate] = None
 
 class StartPayload(BaseModel):
     request_id: int = Field(..., gt=0)
@@ -75,30 +79,31 @@ class StartPayload(BaseModel):
     data_raw: Optional[str] = None
 
 class ResultRequest(BaseModel):
-    request_id: int = Field(..., gt=0)
+    # support both names so client can send either
+    request_id: Optional[int] = None
+    id: Optional[int] = None
 
 class ApiStatus(BaseModel):
+    ok: bool
     status: str
     result: Optional[str] = None
     message: Optional[str] = None
 
-# ==== NEW: Chat models to match the WordPress plugin ====
-
+# ==== Chat models ====
 class SessionIn(BaseModel):
     user_id: int
-    wp_nonce: Optional[str] = None  # carried through but not used here
+    wp_nonce: Optional[str] = None
 
 class SessionOut(BaseModel):
     session_id: str
     token: str
 
 class VisibleValue(BaseModel):
-    # From your WP visible_values (most fields optional)
     id: Optional[int] = None
     crisis_description: Optional[str] = None
     sector: Optional[str] = None
     origin: Optional[str] = None
-    audience_locales: Optional[str] = None  # plugin sends comma-joined for display, OK as string
+    audience_locales: Optional[str] = None
     public_sentiment: Optional[str] = None
     urgency_level: Optional[str] = None
     language: Optional[str] = None
@@ -106,9 +111,7 @@ class VisibleValue(BaseModel):
     constraints: Optional[str] = None
     kb_tags: Optional[str] = None
     date: Optional[str] = None
-
-    # critical for chat context
-    article: Optional[str] = None  # latest narrative text (edited or raw), from localStorage/DB
+    article: Optional[str] = None
 
 class ChatIn(BaseModel):
     session_id: str
@@ -120,7 +123,6 @@ class ChatIn(BaseModel):
 # Helpers
 # -----------------------------------------------------------------------------
 def _normalize_language(d: Dict[str, Any]) -> None:
-    """Map Arabic/English labels to ar/en."""
     lang = (d.get("language") or "").strip().lower()
     if lang in ("العربية", "arabic", "ar"):
         d["language"] = "ar"
@@ -128,7 +130,6 @@ def _normalize_language(d: Dict[str, Any]) -> None:
         d["language"] = "en"
 
 def _to_llm_input(data: Optional[CrisisInput], data_raw: Optional[str]):
-    """Prefer structured dict; otherwise raw string; else {}."""
     if data is not None:
         d = data.model_dump(exclude_none=True)
         if isinstance(d, dict):
@@ -139,7 +140,6 @@ def _to_llm_input(data: Optional[CrisisInput], data_raw: Optional[str]):
     return {}
 
 def _values_to_context(values: List[VisibleValue]) -> str:
-    """Arabic context line(s) for chat based on latest visible values."""
     if not values:
         return "لا توجد بيانات مرئية حالياً لهذا المستخدم."
     v = values[0]
@@ -155,19 +155,21 @@ def _values_to_context(values: List[VisibleValue]) -> str:
     if v.public_sentiment:   pieces.append(f"انطباع الجمهور: {v.public_sentiment}")
     if v.date:               pieces.append(f"التاريخ: {v.date}")
     if v.crisis_description: pieces.append(f"وصف الأزمة: {v.crisis_description}")
-    # Include latest narrative text if available
     if v.article:
-        # keep it last, labelled clearly
-        pieces.append(f"أحدث نص (تحليلي/صياغي):\n{v.article}")
+        pieces.append(f"أحدث نص:\n{v.article}")
     return " | ".join(pieces) if pieces else "لا توجد تفاصيل كافية."
 
+def _no_store(resp: dict) -> JSONResponse:
+    r = JSONResponse(resp)
+    r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    r.headers["Pragma"] = "no-cache"
+    r.headers["Expires"] = "0"
+    return r
+
 # -----------------------------------------------------------------------------
-# Core LLM function — narrative (no JSON)
+# Core LLM function — narrative
 # -----------------------------------------------------------------------------
 def crisis_management_narrative(data: Any) -> str:
-    """
-    Returns a HUMAN narrative report (no JSON). Arabic or English based on input.
-    """
     prompt = f"""
     أنت مستشار أزمات اتصالية احترافي.
     - التزم بالقانون والسياسات الداخلية، وتجنّب الافتراضات غير المؤكدة.
@@ -262,7 +264,7 @@ def crisis_management_narrative(data: Any) -> str:
 # FastAPI app & CORS
 # -----------------------------------------------------------------------------
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-app = FastAPI(title="Crisis Management API", version="1.1.0")
+app = FastAPI(title="Crisis Management API", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -276,20 +278,21 @@ app.add_middleware(
 # Background processor
 # -----------------------------------------------------------------------------
 def process_job(payload: StartPayload):
-    """Run in background; store RAW narrative text (no JSON normalization)."""
+    """Run in background; store RAW narrative text (no JSON)."""
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
+        log.info("Data saved successfully (request_id=%s)", payload.request_id)
     except Exception as e:
         err_text = f"ERROR: {type(e).__name__}: {e}"
         try:
             save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
-        except Exception:
-            pass
+        finally:
+            log.exception("Background job failed: %s", e)
 
 # -----------------------------------------------------------------------------
-# Routes (existing)
+# Routes
 # -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -297,76 +300,73 @@ def health():
 
 @app.post("/start", response_model=ApiStatus)
 def start(payload: StartPayload, bg: BackgroundTasks):
-    """
-    Async mode: enqueue job and return 'processing' immediately.
-    """
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
-
+        return ApiStatus(ok=True, status="done", result=existing["edited_result"] or existing["result"])
     bg.add_task(process_job, payload)
-    return ApiStatus(status="processing")
+    return ApiStatus(ok=True, status="processing")
 
 @app.post("/start_sync", response_model=ApiStatus)
 def start_sync(payload: StartPayload):
-    """
-    Sync mode: generate immediately and return 'done' + result.
-    """
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
-
+        return ApiStatus(ok=True, status="done", result=existing["edited_result"] or existing["result"])
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
-        return ApiStatus(status="done", result=raw)
+        return ApiStatus(ok=True, status="done", result=raw)
     except Exception as e:
         err_text = f"ERROR: {type(e).__name__}: {e}"
         try:
             save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
         finally:
-            return ApiStatus(status="error", message=err_text)
+            return ApiStatus(ok=False, status="error", message=err_text)
 
-@app.post("/result", response_model=ApiStatus)
+@app.post("/result")
 def get_result(req: ResultRequest):
     """
-    Poll for the stored result text.
+    Stable, cache-busting result endpoint.
+    Always returns one of:
+      {"ok": false, "status":"processing"}
+      {"ok": true,  "status":"done", "result":"..."}
     """
-    row = fetch_latest_result(req.request_id)
+    rid = req.request_id or req.id
+    if not rid:
+        raise HTTPException(status_code=400, detail="Missing request_id")
+
+    row = fetch_latest_result(int(rid))
     if not row:
-        return ApiStatus(status="processing")
-    return ApiStatus(status="done", result=row["edited_result"] or row["result"])
+        log.info("Fetched result: <None> (request_id=%s)", rid)
+        return _no_store({"ok": False, "status": "processing"})
+
+    text = (row.get("edited_result") or row.get("result") or "").strip()
+    if not text:
+        log.info("Fetched result: <empty> (request_id=%s)", rid)
+        return _no_store({"ok": False, "status": "processing"})
+
+    log.info("Fetched result: <dict> (request_id=%s)", rid)
+    return _no_store({"ok": True, "status": "done", "result": text, "id": int(rid)})
 
 # -----------------------------------------------------------------------------
-# NEW: Chat routes
+# Chat
 # -----------------------------------------------------------------------------
 @app.post("/session", response_model=SessionOut)
 def create_session(body: SessionIn):
-    """
-    Creates a short-lived JWT for chat. The token is required in Authorization header for /chat.
-    """
     sid = str(uuid.uuid4())
     token = _make_jwt(sid, body.user_id)
+    log.info("✅ Connected! /session")
     return SessionOut(session_id=sid, token=token)
 
 @app.post("/chat")
 def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
-    """
-    Streaming chat using OpenAI; relies on the visible_values you send from WP.
-    Returns 'text/plain' stream (no SSE framing), exactly how your JS expects it.
-    """
     _verify_jwt(authorization)
-
-    # Build system prompt from visible values (Arabic default; switch by 'language' if needed)
     context = _values_to_context(body.visible_values)
     sys_prompt = (
         "أنت مساعد موثوق يجيب بالاعتماد على البيانات المرئية الحالية للمستخدم. "
-        "إذا كانت المعلومة غير متوفرة في البيانات المرئية فاذكر ذلك صراحةً "
-        "واقترح ما يمكن فعله للحصول عليها.\n\n"
+        "إذا كانت المعلومة غير متوفرة فاذكر ذلك صراحةً واقترح ما يمكن فعله للحصول عليها.\n\n"
         f"البيانات المرئية الحالية:\n{context}"
     )
-
     user_msg = body.message or ""
     def stream():
         try:
@@ -384,7 +384,7 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
                 if delta:
                     yield delta
         except Exception as e:
-            # Surface readable error to the user stream
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
+    log.info("✅ Connected! /chat")
     return StreamingResponse(stream(), media_type="text/plain")
