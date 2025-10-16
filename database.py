@@ -19,7 +19,6 @@ DB_PORT = int(os.getenv("DB_PORT") or 3306)
 DATA_TABLE    = "wpl3_crisis_management_tool"
 RESULTS_TABLE = "wpl3_crisis_management_result"
 
-
 def get_db_connection():
     """
     Returns a live MySQL connection or None on failure.
@@ -40,7 +39,6 @@ def get_db_connection():
         print("❌ Failed.")
         print(f"Error connecting to MySQL: {e}")
     return None
-
 
 def save_result(request_id: int, user_id: int, result_text: str) -> None:
     """
@@ -110,7 +108,6 @@ def save_result(request_id: int, user_id: int, result_text: str) -> None:
             conn.close()
         except Exception:
             pass
-
 
 def fetch_latest_result(request_id: int) -> Optional[Dict[str, Any]]:
     """
