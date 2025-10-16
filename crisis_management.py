@@ -95,7 +95,7 @@ class VisibleValue(BaseModel):
     kb_tags: Optional[str] = None
     date: Optional[str] = None
     # main context: latest narrative text cached in browser or from DB (plugin sends it)
-    article: Optional[str] = None
+    crisis_plan: Optional[str] = None
 
 class ChatIn(BaseModel):
     session_id: str
@@ -139,7 +139,7 @@ def _values_to_context(values: List[VisibleValue]) -> str:
     if v.public_sentiment:   parts.append(f"انطباع الجمهور: {v.public_sentiment}")
     if v.date:               parts.append(f"التاريخ: {v.date}")
     if v.crisis_description: parts.append(f"وصف الأزمة: {v.crisis_description}")
-    if v.article:            parts.append(f"أحدث نص:\n{v.article}")
+    if v.crisis_plan:        parts.append(f"أحدث نص:\n{v.crisis_plan}")
     return " | ".join(parts) if parts else "لا توجد تفاصيل كافية."
 
 def _make_jwt(session_id: str, user_id: int) -> str:
@@ -354,3 +354,4 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
     return StreamingResponse(stream(), media_type="text/plain")
+
