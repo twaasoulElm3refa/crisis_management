@@ -1,3 +1,4 @@
+# api.py
 import os
 import time
 import uuid
@@ -10,10 +11,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
-import jwt  
+import jwt
+import logging
 
-# ---- DB helpers (your existing functions) ----
-from database import fetch_latest_result, save_result
+from database import fetch_latest_result, save_result  # <- our fixed helpers
 
 # -----------------------------------------------------------------------------
 # Setup
@@ -25,7 +26,10 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 JWT_SECRET = os.getenv("JWT_SECRET") or os.urandom(32)
 JWT_ALG = "HS256"
 
-app = FastAPI(title="Crisis Management API", version="1.3.0")
+log = logging.getLogger("crm_api")
+logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="Crisis Management API", version="1.3.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,7 +76,7 @@ class ApiStatus(BaseModel):
     result: Optional[str] = None
     message: Optional[str] = None
 
-# ==== Chat models (matches the example concept) ====
+# Chat models
 class SessionIn(BaseModel):
     user_id: int
     wp_nonce: Optional[str] = None
@@ -94,8 +98,7 @@ class VisibleValue(BaseModel):
     constraints: Optional[str] = None
     kb_tags: Optional[str] = None
     date: Optional[str] = None
-    # main context: latest narrative text cached in browser or from DB (plugin sends it)
-    crisis_plan: Optional[str] = None
+    crisis_plan: Optional[str] = None  # <-- unified name
 
 class ChatIn(BaseModel):
     session_id: str
@@ -149,14 +152,14 @@ def _make_jwt(session_id: str, user_id: int) -> str:
         "iat": int(time.time()),
         "exp": int(time.time()) + 60 * 60 * 2,  # 2 hours
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def _verify_jwt(bearer: Optional[str]):
     if not bearer or not bearer.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     token = bearer.split(" ", 1)[1]
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -251,6 +254,7 @@ def crisis_management_narrative(data: Any) -> str:
     - كن عمليًا ودقيقًا، وقدّم سببًا واضحًا لكل اختيار.
     - لا تستخدم JSON أو ترميز برمجي؛ الإخراج نصي إنساني قابل للقراءة والتطبيق الفوري.
     """
+    
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -262,7 +266,7 @@ def crisis_management_narrative(data: Any) -> str:
     return resp.choices[0].message.content
 
 # -----------------------------------------------------------------------------
-# Routes (existing)
+# Routes
 # -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
@@ -272,7 +276,7 @@ def health():
 def start(payload: StartPayload, bg: BackgroundTasks):
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
+        return ApiStatus(status="done", result=(existing.get("edited_result") or existing.get("result")))
     bg.add_task(process_job, payload)
     return ApiStatus(status="processing")
 
@@ -280,7 +284,7 @@ def start(payload: StartPayload, bg: BackgroundTasks):
 def start_sync(payload: StartPayload):
     existing = fetch_latest_result(payload.request_id)
     if existing:
-        return ApiStatus(status="done", result=existing["edited_result"] or existing["result"])
+        return ApiStatus(status="done", result=(existing.get("edited_result") or existing.get("result")))
     try:
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
@@ -297,8 +301,13 @@ def start_sync(payload: StartPayload):
 def get_result(req: ResultRequest):
     row = fetch_latest_result(req.request_id)
     if not row:
+        log.info("Result: <None> (request_id=%s)", req.request_id)
         return _nostore({"status": "processing"})
-    return _nostore({"status": "done", "result": row["edited_result"] or row["result"]})
+    text = (row.get("edited_result") or row.get("result") or "").strip()
+    if not text:
+        log.info("Result: <empty> (request_id=%s)", req.request_id)
+        return _nostore({"status": "processing"})
+    return _nostore({"status": "done", "result": text})
 
 # -----------------------------------------------------------------------------
 # Background worker
@@ -308,15 +317,17 @@ def process_job(payload: StartPayload):
         data_for_llm = _to_llm_input(payload.data, payload.data_raw)
         raw = crisis_management_narrative(data_for_llm)
         save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=raw)
+        log.info("Saved result (request_id=%s)", payload.request_id)
     except Exception as e:
         err_text = f"ERROR: {type(e).__name__}: {e}"
         try:
             save_result(request_id=payload.request_id, user_id=payload.user_id, result_text=err_text)
         except Exception:
             pass
+        log.exception("process_job failed: %s", e)
 
 # -----------------------------------------------------------------------------
-# NEW: chat (same concept as example)
+# Chat
 # -----------------------------------------------------------------------------
 @app.post("/session", response_model=SessionOut)
 def create_session(body: SessionIn):
@@ -347,12 +358,11 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
                 stream=True
             )
             for chunk in response:
-                delta = getattr(chunk.choices[0].delta, "content", None) if chunk.choices else None
-                if delta:
-                    yield delta
+                if chunk.choices:
+                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    if delta:
+                        yield delta
         except Exception as e:
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
     return StreamingResponse(stream(), media_type="text/plain")
-
-
