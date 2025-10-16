@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
-import jwt  # PyJWT
+import jwt  
 
 # ---- DB helpers (your existing functions) ----
 from database import fetch_latest_result, save_result
@@ -23,7 +23,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 JWT_SECRET = os.getenv("JWT_SECRET") or os.urandom(32)
-#JWT_ALG = "HS256"
+JWT_ALG = "HS256"
 
 app = FastAPI(title="Crisis Management API", version="1.3.0")
 
@@ -354,4 +354,5 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
     return StreamingResponse(stream(), media_type="text/plain")
+
 
