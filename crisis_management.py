@@ -23,7 +23,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 JWT_SECRET = os.getenv("JWT_SECRET") or os.urandom(32)
-JWT_ALG = "HS256"
+#JWT_ALG = "HS256"
 
 app = FastAPI(title="Crisis Management API", version="1.3.0")
 
