@@ -16,8 +16,8 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = int(os.getenv("DB_PORT") or 3306)
 
-DATA_TABLE    = "wpl3_crisis_management_tool"
-RESULTS_TABLE = "wpl3_crisis_management_result"
+DATA_TABLE    = "A11i_crisis_management_tool"
+RESULTS_TABLE = "A11i_crisis_management_result"
 
 def get_db_connection():
     """
