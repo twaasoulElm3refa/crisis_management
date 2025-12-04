@@ -366,3 +366,4 @@ def chat(body: ChatIn, authorization: Optional[str] = Header(None)):
             yield f"\n[خطأ: {type(e).__name__}] {e}"
 
     return StreamingResponse(stream(), media_type="text/plain")
+
